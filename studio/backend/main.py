@@ -37,6 +37,7 @@ from routes import (
     export_router,
     inference_router,
     models_router,
+    settings_router,
     training_router,
 )
 from auth import storage
@@ -137,6 +138,7 @@ app.include_router(inference_router, prefix = "/v1", tags = ["openai-compat"])
 app.include_router(datasets_router, prefix = "/api/datasets", tags = ["datasets"])
 app.include_router(data_recipe_router, prefix = "/api/data-recipe", tags = ["data-recipe"])
 app.include_router(export_router, prefix = "/api/export", tags = ["export"])
+app.include_router(settings_router, prefix = "/api/settings", tags = ["settings"])
 
 
 # ============ Health and System Endpoints ============

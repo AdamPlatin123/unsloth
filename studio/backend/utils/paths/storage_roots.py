@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -78,6 +79,57 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Studio config (persisted as JSON in ~/.unsloth/studio/config.json)
+# ---------------------------------------------------------------------------
+
+def config_path() -> Path:
+    """Return path to the studio config file."""
+    return studio_root() / "config.json"
+
+
+def load_studio_config() -> dict:
+    """Read studio config; return empty dict on missing / corrupt file."""
+    cp = config_path()
+    if not cp.is_file():
+        return {}
+    try:
+        return json.loads(cp.read_text(encoding = "utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_studio_config(config: dict) -> None:
+    """Write *config* dict to the studio config file."""
+    cp = config_path()
+    ensure_dir(cp.parent)
+    cp.write_text(
+        json.dumps(config, indent = 2, ensure_ascii = False) + "\n",
+        encoding = "utf-8",
+    )
+
+
+def apply_china_mirrors(enabled: bool) -> None:
+    """Set or clear China-mainland mirror environment variables.
+
+    When *enabled* is True, sets HF_ENDPOINT / PIP_INDEX_URL / UV_INDEX_URL
+    to domestic mirrors.  When False, only removes values that match the
+    mirror URLs we set — user-supplied values are preserved.
+    """
+    mirrors = {
+        "HF_ENDPOINT": "https://hf-mirror.com",
+        "PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "UV_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    }
+    if enabled:
+        for key, value in mirrors.items():
+            os.environ[key] = value
+    else:
+        for key, value in mirrors.items():
+            if os.environ.get(key) == value:
+                os.environ.pop(key, None)
+
+
 def _setup_cache_env() -> None:
     """Set cache environment variables for HuggingFace, uv, and vLLM.
 
@@ -98,6 +150,11 @@ def _setup_cache_env() -> None:
         if key not in os.environ:
             os.environ[key] = value
             Path(value).mkdir(parents = True, exist_ok = True)
+
+    # Restore China mirror setting from persisted config
+    cfg = load_studio_config()
+    if cfg.get("china_mirror_enabled"):
+        apply_china_mirrors(True)
 
 
 def ensure_studio_directories() -> None:

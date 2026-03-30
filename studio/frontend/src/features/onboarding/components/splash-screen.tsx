@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import { useEffect, useState } from "react";
+
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { authFetch } from "@/features/auth/api";
 import { motion } from "motion/react";
 
 interface SplashScreenProps {
@@ -10,10 +14,55 @@ interface SplashScreenProps {
   onGoToStudio: () => void;
 }
 
+interface ChinaMirrorState {
+  enabled: boolean;
+  hf_endpoint: string | null;
+}
+
 export function SplashScreen({
   onStartOnboarding,
   onGoToStudio,
 }: SplashScreenProps) {
+  const [mirrorEnabled, setMirrorEnabled] = useState(false);
+  const [mirrorLoading, setMirrorLoading] = useState(false);
+
+  // Fetch current mirror state on mount
+  useEffect(() => {
+    let cancelled = false;
+    authFetch("/api/settings/china-mirror")
+      .then((res) => {
+        if (res.ok && !cancelled) return res.json();
+        return null;
+      })
+      .then((data: ChinaMirrorState | null) => {
+        if (data && !cancelled) setMirrorEnabled(data.enabled);
+      })
+      .catch(() => {
+        // Non-critical: if the fetch fails just keep default (off)
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleMirrorToggle(checked: boolean) {
+    setMirrorLoading(true);
+    try {
+      const res = await authFetch("/api/settings/china-mirror", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: checked }),
+      });
+      if (res.ok) {
+        setMirrorEnabled(checked);
+      }
+    } catch {
+      // Silently ignore — the user can retry
+    } finally {
+      setMirrorLoading(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-background via-background to-primary/5 p-6">
       <Card className="w-full max-w-md px-8 py-8 shadow-border ring-1 ring-border">
@@ -68,6 +117,33 @@ export function SplashScreen({
           <Button size="lg" variant="outline" onClick={onGoToStudio}>
             Skip Onboarding
           </Button>
+        </motion.div>
+
+        {/* China mainland mirror toggle */}
+        <motion.div
+          className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-4 py-3"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{
+            duration: 0.4,
+            ease: [0.165, 0.84, 0.44, 1],
+            delay: 1.1,
+          }}
+        >
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-medium leading-none">
+              China Mainland Optimization
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Use domestic mirrors for faster downloads
+            </span>
+          </div>
+          <Switch
+            size="sm"
+            checked={mirrorEnabled}
+            onCheckedChange={handleMirrorToggle}
+            disabled={mirrorLoading}
+          />
         </motion.div>
       </Card>
     </div>
