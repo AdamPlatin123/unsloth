@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from utils.paths import recipe_datasets_root, resolve_dataset_path
@@ -119,6 +120,7 @@ def publish_recipe_dataset(
             builder_config_path = builder_config_path,
         )
 
-        return f"https://huggingface.co/datasets/{repo_id}"
+        _hf_base = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+        return f"{_hf_base}/datasets/{repo_id}"
     except HuggingFaceHubClientUploadError as exc:
         raise RecipeDatasetPublishError(str(exc)) from exc

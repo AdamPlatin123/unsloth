@@ -167,7 +167,8 @@ def _check_tokenizer_config_needs_v5(model_name: str) -> bool:
     # --- Fall back to fetching from HuggingFace ----------------------------
     import urllib.request
 
-    url = f"https://huggingface.co/{model_name}/raw/main/tokenizer_config.json"
+    _hf_base = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+    url = f"{_hf_base}/{model_name}/raw/main/tokenizer_config.json"
     try:
         req = urllib.request.Request(url, headers = {"User-Agent": "unsloth-studio"})
         with urllib.request.urlopen(req, timeout = 10) as resp:

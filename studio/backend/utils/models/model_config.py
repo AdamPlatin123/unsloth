@@ -715,7 +715,8 @@ def _detect_audio_from_tokenizer(
             headers["Authorization"] = f"Bearer {token}"
 
         for tok_path in paths_to_try:
-            url = f"https://huggingface.co/{model_name}/resolve/main/{tok_path}"
+            _hf_base = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+            url = f"{_hf_base}/{model_name}/resolve/main/{tok_path}"
             resp = requests.get(url, headers = headers, timeout = 15)
             if not resp.ok:
                 continue
