@@ -326,7 +326,7 @@ export function useChatModelRuntime() {
         : undefined;
       const previousIsLora =
         previousModel?.isLora ?? (previousLora ? true : false);
-      const isLocal = modelId.startsWith("/") || modelId.startsWith("./");
+      const isLocal = modelId.startsWith("/") || modelId.startsWith("./") || /^[A-Za-z]:[\\/]/.test(modelId);
       const isCachedLora = isLora && isLocal;
       const loadingDescription = [
         currentCheckpoint ? "Switching models." : null,
