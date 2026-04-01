@@ -125,8 +125,9 @@ class InferenceOrchestrator:
         try:
             import httpx
 
+            _hf_base = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
             resp = httpx.get(
-                "https://huggingface.co/api/models",
+                f"{_hf_base}/api/models",
                 params = {
                     "author": "unsloth",
                     "sort": "downloads",
