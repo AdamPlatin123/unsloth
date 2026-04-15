@@ -71,6 +71,7 @@ type LoraCandidate = {
   id: string;
   baseModel: string;
   updatedAt?: number;
+  exportType?: "lora" | "merged" | "gguf";
 };
 
 function normalizeModelRef(value: string | null | undefined): string {
@@ -81,12 +82,13 @@ function pickBestLoraForBase(
   loras: LoraCandidate[],
   baseModel: string | null,
 ): LoraCandidate | null {
-  if (loras.length === 0) return null;
-  const sorted = [...loras].sort(
+  const adapterOnly = loras.filter((lora) => lora.exportType === "lora");
+  if (adapterOnly.length === 0) return null;
+  const sorted = [...adapterOnly].sort(
     (a, b) => (b.updatedAt ?? -1) - (a.updatedAt ?? -1),
   );
   const normalizedBase = normalizeModelRef(baseModel);
-  if (!normalizedBase) return sorted[0];
+  if (!normalizedBase) return sorted[0] ?? null;
 
   const exact = sorted.find(
     (lora) => normalizeModelRef(lora.baseModel) === normalizedBase,
@@ -101,7 +103,7 @@ function pickBestLoraForBase(
       normalizedBase.includes(normalizedLoraBase)
     );
   });
-  return partial ?? sorted[0];
+  return partial ?? sorted[0] ?? null;
 }
 
 function messageHasImage(message: MessageRecord): boolean {
@@ -154,7 +156,8 @@ type CompareModelSelection = {
 function useIsLoraCompare(): boolean {
   return useChatRuntimeStore((s) => {
     const cp = s.params.checkpoint;
-    return cp ? s.loras.some((l) => l.id === cp) : false;
+    const selected = cp ? s.loras.find((l) => l.id === cp) : undefined;
+    return selected?.exportType === "lora";
   });
 }
 
@@ -225,6 +228,7 @@ const LoraCompareContent = memo(function LoraCompareContent({
                 modelType="base"
                 pairId={pairId}
                 initialThreadId={baseThreadId}
+                syncActiveThreadId={false}
               >
                 <RegisterCompareHandle name="base" />
                 <Thread hideComposer={true} hideWelcome={true} />
@@ -234,7 +238,7 @@ const LoraCompareContent = memo(function LoraCompareContent({
           <div className="flex min-h-0 flex-col border-t border-border/60 md:border-t-0 md:border-l">
             <div className="px-3 py-1.5 text-start md:text-end">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">
-                Fine-tuned (LoRA)
+                Fine-tuned
               </span>
             </div>
             <div className="min-h-0 flex-1">
@@ -242,6 +246,7 @@ const LoraCompareContent = memo(function LoraCompareContent({
                 modelType="lora"
                 pairId={pairId}
                 initialThreadId={loraThreadId}
+                syncActiveThreadId={false}
               >
                 <RegisterCompareHandle name="lora" />
                 <Thread hideComposer={true} hideWelcome={true} />
@@ -249,7 +254,7 @@ const LoraCompareContent = memo(function LoraCompareContent({
             </div>
           </div>
         </div>
-        <div className="mx-auto w-full max-w-4xl px-4 py-4">
+        <div className="z-20 mx-auto w-full max-w-4xl shrink-0 border-t border-border/60 bg-background px-4 pt-2 pb-4">
           <SharedComposer handlesRef={handlesRef} />
         </div>
       </div>
@@ -343,6 +348,7 @@ const GeneralCompareContent = memo(function GeneralCompareContent({
                 modelType="model1"
                 pairId={pairId}
                 initialThreadId={model1ThreadId}
+                syncActiveThreadId={false}
               >
                 <RegisterCompareHandle name="model1" />
                 <Thread hideComposer={true} hideWelcome={true} />
@@ -376,6 +382,7 @@ const GeneralCompareContent = memo(function GeneralCompareContent({
                 modelType="model2"
                 pairId={pairId}
                 initialThreadId={model2ThreadId}
+                syncActiveThreadId={false}
               >
                 <RegisterCompareHandle name="model2" />
                 <Thread hideComposer={true} hideWelcome={true} />
@@ -383,7 +390,7 @@ const GeneralCompareContent = memo(function GeneralCompareContent({
             </div>
           </div>
         </div>
-        <div className="mx-auto w-full max-w-4xl px-4 py-4">
+        <div className="z-20 mx-auto w-full max-w-4xl shrink-0 border-t border-border/60 bg-background px-4 pt-2 pb-4">
           <SharedComposer
             handlesRef={handlesRef}
             model1={model1}
@@ -479,11 +486,19 @@ function TopBarActions({
   );
 }
 
+function getInitialSingleChatView(): ChatView {
+  const id = useChatRuntimeStore.getState().activeThreadId;
+  if (typeof id === "string" && id.length > 0 && !id.startsWith("__LOCALID_")) {
+    return { mode: "single", threadId: id };
+  }
+  return { mode: "single" };
+}
+
 export function ChatPage(): ReactElement {
-  const [view, setView] = useState<ChatView>({
-    mode: "single",
-    newThreadNonce: crypto.randomUUID(),
-  });
+  // Do not set newThreadNonce here: each /chat mount would run ThreadNewChatSwitch
+  // and create spurious threads when navigating (e.g. Recipes / Export). New Chat
+  // explicitly sets a nonce in handleNewThread.
+  const [view, setView] = useState<ChatView>(getInitialSingleChatView);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
   const [modelSelectorLocked, setModelSelectorLocked] = useState(false);
@@ -587,11 +602,25 @@ export function ChatPage(): ReactElement {
     void ejectModel();
   }, [ejectModel]);
   const handleNewThread = useCallback(() => {
+    // Skip if we are already on a fresh unsaved draft with no messages sent.
+    // Once the user sends a message, append() sets activeThreadId in the store,
+    // so we check the store to know whether the current draft has been sent.
+    if (
+      view.mode === "single" &&
+      !view.threadId &&
+      !useChatRuntimeStore.getState().activeThreadId
+    ) {
+      return;
+    }
+
     useChatRuntimeStore.getState().setActiveThreadId(null);
     setView({ mode: "single", newThreadNonce: crypto.randomUUID() });
-  }, []);
+  }, [view]);
   const handleNewCompare = useCallback(() => {
     setView({ mode: "compare", pairId: crypto.randomUUID() });
+    // Clear activeThreadId so compare panes do not inherit the single-chat
+    // thread ID as a fallback for session_id routing.
+    useChatRuntimeStore.getState().setActiveThreadId(null);
     useChatRuntimeStore.getState().setContextUsage(null);
   }, []);
 
@@ -619,6 +648,9 @@ export function ChatPage(): ReactElement {
   const enterCompare = useCallback(() => {
     setViewBeforeCompare((prev) => prev ?? view);
     setView({ mode: "compare", pairId: crypto.randomUUID() });
+    // Clear activeThreadId so compare panes do not inherit the single-chat
+    // thread ID as a fallback for session_id routing.
+    useChatRuntimeStore.getState().setActiveThreadId(null);
     useChatRuntimeStore.getState().setContextUsage(null);
   }, [view]);
 
@@ -626,9 +658,13 @@ export function ChatPage(): ReactElement {
     if (!viewBeforeCompare) return;
     setView(viewBeforeCompare);
     setViewBeforeCompare(null);
-    // Restore context usage from the active thread's last assistant message
+    // Restore context usage from the active thread's last assistant message.
+    // Use the thread ID from the saved view rather than the store, because
+    // activeThreadId may have been cleared on compare entry.
     const store = useChatRuntimeStore.getState();
-    const threadId = store.activeThreadId;
+    const threadId =
+      ("threadId" in viewBeforeCompare ? viewBeforeCompare.threadId : null) ??
+      store.activeThreadId;
     if (threadId) {
       void db.messages
         .where("threadId")
@@ -735,6 +771,7 @@ export function ChatPage(): ReactElement {
           await selectModelRef.current({ id: targetLora.id, isLora: true });
           if (canceled) return;
           setView({ mode: "compare", pairId: crypto.randomUUID() });
+          useChatRuntimeStore.getState().setActiveThreadId(null);
           useChatRuntimeStore.getState().setContextUsage(null);
           clearHandoff();
           console.info("[chat-handoff] loaded lora + opened compare");
@@ -866,14 +903,16 @@ export function ChatPage(): ReactElement {
                   label={
                     loadProgress?.phase === "starting"
                       ? "Starting model…"
-                      : loadingModel.isDownloaded
+                      : loadingModel.isDownloaded || loadingModel.isCachedLora
                         ? "Loading model…"
                         : "Downloading model…"
                   }
                   title={
                     loadingModel.isDownloaded
                       ? `Loading ${loadingModel.displayName} from cache.`
-                      : `Loading ${loadingModel.displayName}. This may include downloading.`
+                      : loadingModel.isCachedLora
+                        ? `Loading ${loadingModel.displayName} into memory.`
+                        : `Loading ${loadingModel.displayName}. This may include downloading.`
                   }
                   progressPercent={loadProgress?.percent}
                   progressLabel={loadProgress?.label}
@@ -909,7 +948,7 @@ export function ChatPage(): ReactElement {
 
           {view.mode === "single" ? (
             <SingleContent
-              key={view.threadId ?? view.newThreadNonce ?? "new"}
+              key={view.threadId ?? "single"}
               threadId={view.threadId}
               newThreadNonce={view.newThreadNonce}
             />

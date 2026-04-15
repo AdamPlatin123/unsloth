@@ -32,8 +32,9 @@ from auth.authentication import get_current_subject
 # Import backend functions
 try:
     from utils.models import (
-        scan_trained_loras,
+        scan_trained_models,
         scan_exported_models,
+        get_base_model_from_checkpoint,
         load_model_defaults,
         get_base_model_from_lora,
         is_vision_model,
@@ -49,8 +50,10 @@ try:
     )
     from core.inference import get_inference_backend
     from utils.paths import (
+        is_local_path,
         outputs_root,
         exports_root,
+        resolve_cached_repo_id_case,
         resolve_output_dir,
         resolve_export_dir,
     )
@@ -60,8 +63,9 @@ except ImportError:
     if str(parent_backend) not in sys.path:
         sys.path.insert(0, str(parent_backend))
     from utils.models import (
-        scan_trained_loras,
+        scan_trained_models,
         scan_exported_models,
+        get_base_model_from_checkpoint,
         load_model_defaults,
         get_base_model_from_lora,
         is_vision_model,
@@ -77,8 +81,10 @@ except ImportError:
     )
     from core.inference import get_inference_backend
     from utils.paths import (
+        is_local_path,
         outputs_root,
         exports_root,
+        resolve_cached_repo_id_case,
         resolve_output_dir,
         resolve_export_dir,
     )
@@ -134,6 +140,47 @@ def _resolve_hf_cache_dir() -> Path:
         return Path.home() / ".cache" / "huggingface" / "hub"
 
 
+def _is_model_directory(d: Path) -> bool:
+    """Return ``True`` when *d* looks like a model directory.
+
+    A model directory must have **both** a config file (``config.json`` or
+    ``adapter_config.json``) **and** actual model weight files.  Both
+    conditions are required: a bare directory with only loose ``.gguf``
+    files (no config) might be a mixed collection, and a ``config.json``
+    alone (no weights) is not a model directory.
+
+    Excludes ``mmproj`` GGUF files (vision projectors) and non-weight
+    ``.bin`` files (``tokenizer.bin``, ``vocab.bin``, etc.) from the
+    weight check to avoid false positives.
+    """
+
+    def _is_weight_file(f: Path) -> bool:
+        suffix = f.suffix.lower()
+        if suffix == ".safetensors":
+            return True
+        if suffix == ".gguf":
+            return "mmproj" not in f.name.lower()
+        if suffix == ".bin":
+            name = f.name.lower()
+            return (
+                name.startswith("pytorch_model")
+                or name.startswith("model")
+                or name.startswith("adapter_model")
+                or name.startswith("consolidated")
+            )
+        return False
+
+    try:
+        has_config = (d / "config.json").exists() or (
+            d / "adapter_config.json"
+        ).exists()
+        if not has_config:
+            return False
+        return any(_is_weight_file(f) for f in d.iterdir() if f.is_file())
+    except OSError:
+        return False
+
+
 def _scan_models_dir(
     models_dir: Path,
     *,
@@ -141,6 +188,23 @@ def _scan_models_dir(
 ) -> List[LocalModelInfo]:
     if not models_dir.exists() or not models_dir.is_dir():
         return []
+
+    _is_self_model = _is_model_directory(models_dir)
+
+    if _is_self_model:
+        try:
+            updated_at = models_dir.stat().st_mtime
+        except OSError:
+            updated_at = None
+        return [
+            LocalModelInfo(
+                id = str(models_dir),
+                display_name = models_dir.name,
+                path = str(models_dir),
+                source = "models_dir",
+                updated_at = updated_at,
+            ),
+        ]
 
     found: List[LocalModelInfo] = []
     for child in models_dir.iterdir():
@@ -239,6 +303,25 @@ def _scan_lmstudio_dir(lm_dir: Path) -> List[LocalModelInfo]:
     if not lm_dir.exists() or not lm_dir.is_dir():
         return []
 
+    # If the directory itself is a model directory (has config AND weight
+    # files), it is not an LM Studio publisher structure -- return it as a
+    # single model entry.  We cannot skip it silently because this function
+    # is the only scanner called for default LM Studio roots.
+    if _is_model_directory(lm_dir):
+        try:
+            updated_at = lm_dir.stat().st_mtime
+        except OSError:
+            updated_at = None
+        return [
+            LocalModelInfo(
+                id = str(lm_dir),
+                display_name = lm_dir.name,
+                path = str(lm_dir),
+                source = "lmstudio",
+                updated_at = updated_at,
+            ),
+        ]
+
     found: List[LocalModelInfo] = []
     for child in lm_dir.iterdir():
         try:
@@ -257,6 +340,25 @@ def _scan_lmstudio_dir(lm_dir: Path) -> List[LocalModelInfo]:
                             updated_at = updated_at,
                         ),
                     )
+                continue
+
+            # If the child directory itself looks like a model directory
+            # (has config AND weight files), surface it directly instead
+            # of descending into it as a publisher.
+            if _is_model_directory(child):
+                try:
+                    updated_at = child.stat().st_mtime
+                except OSError:
+                    updated_at = None
+                found.append(
+                    LocalModelInfo(
+                        id = str(child),
+                        display_name = child.name,
+                        path = str(child),
+                        source = "lmstudio",
+                        updated_at = updated_at,
+                    ),
+                )
                 continue
 
             # child is a publisher directory -- scan its sub-directories
@@ -586,7 +688,7 @@ def _get_model_size_bytes(
 
 
 @router.get("/config/{model_name:path}")
-async def get_model_config(
+def get_model_config(
     model_name: str,
     hf_token: Optional[str] = Query(None),
     current_subject: str = Depends(get_current_subject),
@@ -597,10 +699,15 @@ async def get_model_config(
     This endpoint wraps the backend load_model_defaults function.
     """
     try:
-        from utils.models.model_config import is_local_path
-
         if not is_local_path(model_name):
-            model_name = model_name.lower()
+            resolved = resolve_cached_repo_id_case(model_name)
+            if resolved != model_name:
+                logger.info(
+                    "Using cached repo_id casing '%s' for requested '%s'",
+                    resolved,
+                    model_name,
+                )
+            model_name = resolved
 
         logger.info(f"Getting model config for: {model_name}")
         from utils.models.model_config import detect_audio_type
@@ -609,7 +716,7 @@ async def get_model_config(
         config_dict = load_model_defaults(model_name)
 
         # Detect model capabilities (pass HF token for gated models)
-        is_vision = is_vision_model(model_name)
+        is_vision = is_vision_model(model_name, hf_token = hf_token)
         is_embedding = is_embedding_model(model_name, hf_token = hf_token)
         audio_type = detect_audio_type(model_name, hf_token = hf_token)
 
@@ -686,15 +793,16 @@ async def scan_loras(
         lora_list = []
 
         # Scan training outputs
-        trained_loras = scan_trained_loras(outputs_dir = resolved_outputs_dir)
-        for display_name, adapter_path in trained_loras:
-            base_model = get_base_model_from_lora(adapter_path)
+        trained_models = scan_trained_models(outputs_dir = resolved_outputs_dir)
+        for display_name, model_path, model_type in trained_models:
+            base_model = get_base_model_from_checkpoint(model_path)
             lora_list.append(
                 LoRAInfo(
                     display_name = display_name,
-                    adapter_path = adapter_path,
+                    adapter_path = model_path,
                     base_model = base_model,
                     source = "training",
+                    export_type = model_type,
                 )
             )
 
@@ -983,6 +1091,25 @@ async def get_gguf_download_progress(
         return {"downloaded_bytes": 0, "expected_bytes": expected_bytes, "progress": 0}
 
 
+def _resolve_hf_cache_realpath(repo_dir: Path) -> Optional[str]:
+    """Pick the most useful on-disk path for a HF cache repo.
+
+    Prefers the most-recent snapshot dir (what `from_pretrained` actually
+    points at). Falls back to the cache repo root. Returns the resolved
+    realpath so symlinks under snapshots/ are followed back to blobs/.
+    """
+    try:
+        snapshots_dir = repo_dir / "snapshots"
+        if snapshots_dir.is_dir():
+            snaps = [s for s in snapshots_dir.iterdir() if s.is_dir()]
+            if snaps:
+                latest = max(snaps, key = lambda s: s.stat().st_mtime)
+                return str(latest.resolve())
+        return str(repo_dir.resolve())
+    except Exception:
+        return None
+
+
 @router.get("/download-progress")
 async def get_download_progress(
     repo_id: str = Query(..., description = "HuggingFace repo ID"),
@@ -993,8 +1120,16 @@ async def get_download_progress(
     Checks the local HF cache for completed blobs and in-progress
     (.incomplete) downloads. Uses the HF API to determine the expected
     total size on the first call, then caches it for subsequent polls.
+    Also returns ``cache_path``: the realpath of the snapshot directory
+    (or the cache repo root if no snapshot exists yet) so the UI can
+    show users where the weights actually live on disk.
     """
-    _empty = {"downloaded_bytes": 0, "expected_bytes": 0, "progress": 0}
+    _empty = {
+        "downloaded_bytes": 0,
+        "expected_bytes": 0,
+        "progress": 0,
+        "cache_path": None,
+    }
     try:
         if not _is_valid_repo_id(repo_id):
             return _empty
@@ -1005,10 +1140,12 @@ async def get_download_progress(
         target = f"models--{repo_id.replace('/', '--')}".lower()
         completed_bytes = 0
         in_progress_bytes = 0
+        cache_path: Optional[str] = None
 
         for entry in cache_dir.iterdir():
             if entry.name.lower() != target:
                 continue
+            cache_path = _resolve_hf_cache_realpath(entry)
             blobs_dir = entry / "blobs"
             if not blobs_dir.is_dir():
                 break
@@ -1023,7 +1160,7 @@ async def get_download_progress(
 
         downloaded_bytes = completed_bytes + in_progress_bytes
         if downloaded_bytes == 0:
-            return _empty
+            return {**_empty, "cache_path": cache_path}
 
         # Get expected size from HF API (cached per repo_id)
         expected_bytes = _get_repo_size_cached(repo_id)
@@ -1033,6 +1170,7 @@ async def get_download_progress(
                 "downloaded_bytes": downloaded_bytes,
                 "expected_bytes": 0,
                 "progress": 0,
+                "cache_path": cache_path,
             }
 
         # Use 95% threshold for completion (blob deduplication can make
@@ -1048,6 +1186,7 @@ async def get_download_progress(
             "downloaded_bytes": downloaded_bytes,
             "expected_bytes": expected_bytes,
             "progress": round(progress, 3),
+            "cache_path": cache_path,
         }
     except Exception as e:
         logger.warning(f"Error checking download progress for {repo_id}: {e}")

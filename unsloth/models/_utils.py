@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "2026.3.18"
+__version__ = "2026.4.4"
 
 __all__ = [
     "SUPPORTS_BFLOAT16",
@@ -534,6 +534,15 @@ try:
 
     gemma3_logger.addFilter(HideLoggingMessage("strongly recommended"))
     del gemma3_logger
+except:
+    pass
+
+# Gemma4 It is strongly recommended to train Gemma4 models with the `eager`
+try:
+    from transformers.models.gemma4.modeling_gemma4 import logger as gemma4_logger
+
+    gemma4_logger.addFilter(HideLoggingMessage("strongly recommended"))
+    del gemma4_logger
 except:
     pass
 
@@ -1930,6 +1939,18 @@ def _unsloth_pre_compute_loss(self, model, inputs, *args, **kwargs):
             _has_ccm = _mod is not None and hasattr(_mod, "create_causal_mask_mapping")
             if _has_ccm and _inner.training:
                 inputs["token_type_ids"] = torch.zeros_like(inputs["input_ids"])
+    # Gemma4 uses mm_token_type_ids (not token_type_ids) for VLM masking
+    if "mm_token_type_ids" not in inputs and "input_ids" in inputs:
+        _inner = model
+        for _attr in ("base_model", "model", "model"):
+            _inner = getattr(_inner, _attr, _inner)
+        if getattr(getattr(_inner, "config", None), "model_type", "") in ("gemma4",):
+            import sys as _sys
+
+            _mod = _sys.modules.get(type(_inner).__module__)
+            _has_ccm = _mod is not None and hasattr(_mod, "create_causal_mask_mapping")
+            if _has_ccm and _inner.training:
+                inputs["mm_token_type_ids"] = torch.zeros_like(inputs["input_ids"])
 
     outputs = self._old_compute_loss(model, inputs, *args, **kwargs)
     return outputs
@@ -2087,11 +2108,14 @@ def patch_gradient_accumulation_fix(Trainer):
                 "def __init__", "def _unsloth___init__", 1
             )
 
-            # Force else branch
-            init_function = re.sub(
-                r'if[\s]+hasattr\(\s*unwrapped_model\s*,\s*"accepts_loss_kwargs"\s*\)\s*:',
-                'if hasattr(unwrapped_model, "accepts_loss_kwargs") and False:',
-                init_function,
+            # Respect an inner wrapped model's explicit accepts_loss_kwargs flag before inferring from forward(**kwargs).
+            # https://github.com/unslothai/unsloth/issues/4982 Gemma4ForConditionalGeneration had issues with grad_acc
+            init_function = init_function.replace(
+                "self.model_accepts_loss_kwargs = unwrapped_model.accepts_loss_kwargs\n    else:",
+                "self.model_accepts_loss_kwargs = unwrapped_model.accepts_loss_kwargs\n"
+                '    elif hasattr(getattr(unwrapped_model, "model", None), "accepts_loss_kwargs"):\n'
+                "        self.model_accepts_loss_kwargs = unwrapped_model.model.accepts_loss_kwargs\n"
+                "    else:",
             )
             exec(init_function, globals())
             Trainer.__init__ = _unsloth___init__
@@ -2749,13 +2773,48 @@ def is_moe_model(model) -> bool:
     return num_experts is not None and num_experts > 0
 
 
+def _resolve_moe_parameter_name(model, default_name: str, alternate_name: str) -> str:
+    """
+    Resolve the actual parameter path for MoE expert weights.
+
+    Most current Unsloth MoE models expose expert weights under
+    ``mlp.experts.*``. Gemma4 stores them directly under ``experts.*``.
+    Prefer the path that exists on the loaded module when possible.
+    """
+    if hasattr(model, "named_parameters"):
+        try:
+            for name, _ in model.named_parameters():
+                if name == default_name or name.endswith("." + default_name):
+                    return default_name
+                if name == alternate_name or name.endswith("." + alternate_name):
+                    return alternate_name
+        except Exception:
+            pass
+
+    config = getattr(model, "config", model)
+    model_types = {getattr(config, "model_type", None)}
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        model_types.add(getattr(text_config, "model_type", None))
+
+    if any(
+        isinstance(model_type, str) and model_type.startswith("gemma4")
+        for model_type in model_types
+    ):
+        return alternate_name
+
+    return default_name
+
+
 def get_moe_target_parameters(model, target_modules = None) -> Optional[List[str]]:
     """
     Get the target_parameters for MoE expert layers if applicable.
 
     For MoE models, returns the parameter paths for expert weights
     (gate_up_proj, down_proj) that should be targeted by PEFT's
-    target_parameters for LoRA on nn.Parameter.
+    target_parameters for LoRA on nn.Parameter. The exact parameter path
+    depends on the model layout, for example ``mlp.experts.*`` or
+    ``experts.*``.
 
     Only includes MoE parameters that match what's in target_modules:
     - If "down_proj" is in target_modules -> includes "mlp.experts.down_proj"
@@ -2803,6 +2862,17 @@ def get_moe_target_parameters(model, target_modules = None) -> Optional[List[str
     else:
         target_set = set(target_modules) if target_modules else set()
 
+    gate_up_name = _resolve_moe_parameter_name(
+        model,
+        default_name = "mlp.experts.gate_up_proj",
+        alternate_name = "experts.gate_up_proj",
+    )
+    down_name = _resolve_moe_parameter_name(
+        model,
+        default_name = "mlp.experts.down_proj",
+        alternate_name = "experts.down_proj",
+    )
+
     # gate_up_proj combines both gate_proj and up_proj in MoE
     # Also match "gate_up_proj" directly since users may specify the fused name
     if (
@@ -2810,10 +2880,10 @@ def get_moe_target_parameters(model, target_modules = None) -> Optional[List[str
         or "up_proj" in target_set
         or "gate_up_proj" in target_set
     ):
-        moe_params.append("mlp.experts.gate_up_proj")
+        moe_params.append(gate_up_name)
 
     if "down_proj" in target_set:
-        moe_params.append("mlp.experts.down_proj")
+        moe_params.append(down_name)
 
     if moe_params:
         print(

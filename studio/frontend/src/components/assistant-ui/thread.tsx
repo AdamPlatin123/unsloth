@@ -56,9 +56,12 @@ import {
   RefreshCwIcon,
   SquareIcon,
   TerminalIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { type FC, useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { deleteThreadMessage } from "@/features/chat/utils/delete-thread-message";
 import { useChatRuntimeStore } from "@/features/chat/stores/chat-runtime-store";
 
 export const Thread: FC<{ hideComposer?: boolean; hideWelcome?: boolean }> = ({
@@ -73,7 +76,7 @@ export const Thread: FC<{ hideComposer?: boolean; hideWelcome?: boolean }> = ({
       }}
     >
       <ThreadPrimitive.Viewport
-        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
+        className="aui-thread-viewport relative flex min-w-0 flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
       >
         {!hideWelcome && (
           <AuiIf condition={({ thread }) => thread.isEmpty}>
@@ -89,8 +92,27 @@ export const Thread: FC<{ hideComposer?: boolean; hideWelcome?: boolean }> = ({
           }}
         />
 
-        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 z-20 mt-auto flex w-full flex-col gap-4 overflow-visible bg-background pb-4 md:pb-4">
-          <ThreadScrollToBottom />
+        <ThreadPrimitive.ViewportFooter
+          className={cn(
+            "aui-thread-viewport-footer sticky bottom-0 z-20 mt-auto flex w-full flex-col overflow-visible bg-transparent",
+            hideComposer ? "gap-2" : "gap-4",
+            // Compare: pointer-events pass-through so messages behind footer stay clickable
+            hideComposer
+              ? "pointer-events-none pb-3"
+              : "relative pb-4",
+          )}
+        >
+          {!hideComposer && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-background" aria-hidden />
+          )}
+          <div
+            className={cn(
+              "flex justify-center",
+              hideComposer && "pointer-events-auto",
+            )}
+          >
+            <ThreadScrollToBottom />
+          </div>
           <AuiIf condition={({ thread }) => !thread.isEmpty}>
             {!hideComposer && <ComposerAnimated />}
           </AuiIf>
@@ -106,7 +128,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible dark:bg-background dark:hover:bg-accent"
+        className="aui-thread-scroll-to-bottom absolute -top-6 z-10 self-center rounded-full p-4 disabled:invisible dark:bg-background dark:hover:bg-accent"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -118,7 +140,7 @@ const SUGGESTION_TOOLS: Record<string, Array<"thinking" | "search" | "code">> = 
   "How do you fine-tune an audio model with Unsloth?": ["thinking", "search"],
   "Create a live weather dashboard in HTML using no API key. Show me the code": ["thinking", "code", "search"],
   "Solve the integral of x·sin(x), and verify it step by step": ["thinking", "code"],
-  "Draw an SVG of a cute sloth": ["thinking", "code", "search"],
+  "Draw an SVG of a cute sloth & show the code": ["thinking", "code", "search"],
 };
 
 const toolIconMap = {
@@ -220,14 +242,20 @@ const GeneratingSpinner: FC = () => {
 
 const ComposerAnimated: FC = () => {
   return (
-    <motion.div
-      layout={true}
-      layoutId="composer"
-      transition={{ type: "spring", bounce: 0.15, duration: 0.5 }}
-      className="mx-auto w-full max-w-(--thread-max-width)"
-    >
-      <Composer />
-    </motion.div>
+    <div className="relative mx-auto min-w-0 w-full max-w-(--thread-max-width)">
+      <div
+        className="pointer-events-none absolute inset-x-0 top-1/2 bottom-0 z-0 bg-background"
+        aria-hidden
+      />
+      <motion.div
+        layout={true}
+        layoutId="composer"
+        transition={{ type: "spring", bounce: 0.15, duration: 0.5 }}
+        className="relative z-10 w-full"
+      >
+        <Composer />
+      </motion.div>
+    </div>
   );
 };
 
@@ -262,7 +290,7 @@ const Composer: FC = () => {
         <ToolStatusDisplay />
         <ComposerPrimitive.Input
           placeholder="Send a message..."
-          className="aui-composer-input mb-1 max-h-32 min-h-12 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
+          className="aui-composer-input mb-1 max-h-32 min-h-12 w-full resize-none bg-transparent pl-5 pr-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
           rows={1}
           autoFocus={true}
           aria-label="Message input"
@@ -574,10 +602,10 @@ const GeneratingIndicator: FC = () => {
 const AssistantMessage: FC = () => {
   return (
     <MessagePrimitive.Root
-      className="aui-assistant-message-root fade-in slide-in-from-bottom-1 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-3 duration-150"
+      className="aui-assistant-message-root fade-in slide-in-from-bottom-1 relative mx-auto min-w-0 w-full max-w-(--thread-max-width) animate-in py-3 duration-150"
       data-role="assistant"
     >
-      <div className="aui-assistant-message-content wrap-break-word px-2 text-foreground leading-relaxed">
+      <div className="aui-assistant-message-content wrap-break-word min-w-0 text-foreground leading-relaxed">
         <GeneratingIndicator />
         <MessagePrimitive.Parts
           components={{
@@ -600,7 +628,7 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      <div className="aui-assistant-message-footer mt-1 ml-2 flex">
+      <div className="aui-assistant-message-footer mt-1 flex">
         <BranchPicker />
         <AssistantActionBar />
       </div>
@@ -609,6 +637,41 @@ const AssistantMessage: FC = () => {
 };
 
 const COPY_RESET_MS = 2000;
+
+const DeleteMessageButton: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+
+  const handleDelete = async () => {
+    const remoteId = aui.threadListItem().getState().remoteId;
+    const thread = aui.thread();
+    try {
+      await deleteThreadMessage({
+        thread: {
+          export: () => thread.export(),
+          import: (data) => thread.import(data),
+        },
+        messageId,
+        remoteId,
+      });
+    } catch (error) {
+      console.error("Failed to delete message", error);
+      toast.error("Failed to delete message");
+    }
+  };
+
+  return (
+    <TooltipIconButton
+      tooltip="Delete message"
+      disabled={isRunning}
+      onClick={handleDelete}
+      className="text-muted-foreground hover:text-destructive"
+    >
+      <Trash2Icon className="size-4" />
+    </TooltipIconButton>
+  );
+};
 
 const CopyButton: FC = () => {
   const aui = useAui();
@@ -648,6 +711,7 @@ const AssistantActionBar: FC = () => {
           <RefreshCwIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Reload>
+      <DeleteMessageButton />
       <MessageTiming side="top" />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild={true}>
@@ -723,6 +787,7 @@ const UserActionBar: FC = () => {
           <PencilIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>
+      <DeleteMessageButton />
     </ActionBarPrimitive.Root>
   );
 };
