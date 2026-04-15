@@ -688,7 +688,7 @@ def _get_model_size_bytes(
 
 
 @router.get("/config/{model_name:path}")
-async def get_model_config(
+def get_model_config(
     model_name: str,
     hf_token: Optional[str] = Query(None),
     current_subject: str = Depends(get_current_subject),
